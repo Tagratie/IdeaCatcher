@@ -1,0 +1,28 @@
+# Build output
+IdeaCatcher.exe
+*.exe
+*.o
+*.obj
+
+# Build logs
+*.log
+build_gcc.log
+build.log
+
+# Local app data (paranoia — app stores in %APPDATA%, not here, but just in case)
+ideas.json
+settings.json
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Claude Code local settings
+.claude/
