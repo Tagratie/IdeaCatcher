@@ -164,6 +164,11 @@ static void LoadSettings() {
         g_settings.width      = j.value("width",  g_settings.width);
         g_settings.height     = j.value("height", g_settings.height);
     } catch (...) {}
+    // Migrate users stuck on the now-removed S preset (300x380) to M.
+    if (g_settings.width == 300 && g_settings.height == 380) {
+        g_settings.width  = 380;
+        g_settings.height = 480;
+    }
 }
 
 static void SaveSettings() {
@@ -340,13 +345,24 @@ static void PositionToCorner() {
     MONITORINFO mi{ sizeof(mi) };
     GetMonitorInfo(hm, &mi);
     RECT w = mi.rcWork;
+    int workW = w.right  - w.left;
+    int workH = w.bottom - w.top;
+
+    // Clamp to the monitor's work area so picking a large preset never
+    // pushes the overlay off the visible screen.
+    int W = g_settings.width;
+    int H = g_settings.height;
+    int maxW = workW - 2 * EDGE_MARGIN;
+    int maxH = workH - 2 * EDGE_MARGIN;
+    if (W > maxW) W = maxW;
+    if (H > maxH) H = maxH;
+
     int x = w.left, y = w.top;
-    int W = g_settings.width, H = g_settings.height;
     switch (g_settings.corner) {
-        case Corner::TopLeft:     x = w.left  + EDGE_MARGIN;          y = w.top    + EDGE_MARGIN;     break;
-        case Corner::TopRight:    x = w.right - W - EDGE_MARGIN;       y = w.top    + EDGE_MARGIN;     break;
-        case Corner::BottomLeft:  x = w.left  + EDGE_MARGIN;          y = w.bottom - H - EDGE_MARGIN; break;
-        case Corner::BottomRight: x = w.right - W - EDGE_MARGIN;       y = w.bottom - H - EDGE_MARGIN; break;
+        case Corner::TopLeft:     x = w.left  + EDGE_MARGIN;     y = w.top    + EDGE_MARGIN;     break;
+        case Corner::TopRight:    x = w.right - W - EDGE_MARGIN; y = w.top    + EDGE_MARGIN;     break;
+        case Corner::BottomLeft:  x = w.left  + EDGE_MARGIN;     y = w.bottom - H - EDGE_MARGIN; break;
+        case Corner::BottomRight: x = w.right - W - EDGE_MARGIN; y = w.bottom - H - EDGE_MARGIN; break;
     }
     SetWindowPos(g_hwnd, HWND_TOPMOST, x, y, W, H, SWP_SHOWWINDOW);
 }
@@ -360,7 +376,8 @@ static void ShowApp() {
     SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     SetForegroundWindow(g_hwnd);
     SetActiveWindow(g_hwnd);
-    g_focusInputNext = true;
+    // Don't auto-focus the input on show - the user clicks it when they
+    // want to type, so the caret only blinks when they've engaged with it.
 }
 static void HideApp() {
     if (g_visible) { ShowWindow(g_hwnd, SW_HIDE); g_visible = false; }
@@ -451,6 +468,9 @@ static void ApplyStyle() {
     c[ImGuiCol_ResizeGrip]           = ImVec4(1.00f, 1.00f, 1.00f, 0.10f);
     c[ImGuiCol_ResizeGripHovered]    = ImVec4(1.00f, 1.00f, 1.00f, 0.20f);
     c[ImGuiCol_ResizeGripActive]     = ImVec4(1.00f, 1.00f, 1.00f, 0.30f);
+    // No modal dim - it would paint a translucent gray over the transparent
+    // overlay and look like the bg "turned black" whenever Settings is open.
+    c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 }
 
 // =================== Settings popup ===================
@@ -497,8 +517,23 @@ static void RenderSettingsPopup() {
         ImGui::OpenPopup("Settings");
         g_openSettings = false;
     }
-    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Settings", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize)) {
+
+    // Center the popup inside the overlay viewport AND clamp its max size to
+    // the viewport (minus a small inset) so at the S size preset (300x380)
+    // it doesn't overflow off-screen into the docked corner. Recentre every
+    // frame so changing the overlay size mid-session keeps it visible.
+    ImVec2 vpSize   = ImGui::GetMainViewport()->Size;
+    ImVec2 vpCenter = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(vpCenter, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    float maxW = vpSize.x - 12.0f;
+    float maxH = vpSize.y - 12.0f;
+    if (maxW < 200.0f) maxW = 200.0f;
+    if (maxH < 200.0f) maxH = 200.0f;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(220.0f, 100.0f), ImVec2(maxW, maxH));
+    float initialW = (280.0f < maxW) ? 280.0f : maxW;
+    ImGui::SetNextWindowSize(ImVec2(initialW, 0.0f), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("Settings", nullptr, ImGuiWindowFlags_NoResize)) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.65f, 0.65f, 0.72f, 1.0f));
         ImGui::TextUnformatted("Hotkey");
         ImGui::PopStyleColor();
@@ -509,21 +544,22 @@ static void RenderSettingsPopup() {
         } else {
             label = HotkeyToString(g_settings.hotkeyMods, g_settings.hotkeyVk);
         }
+        const float kChangeBtnW = 72.0f;
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
         ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
         char buf[128]; snprintf(buf, sizeof(buf), "%s", label.c_str());
-        ImGui::SetNextItemWidth(-90);
+        ImGui::SetNextItemWidth(-(kChangeBtnW + 8.0f));
         ImGui::InputText("##hk", buf, sizeof(buf), ImGuiInputTextFlags_ReadOnly);
         ImGui::PopItemFlag();
         ImGui::PopStyleColor();
         ImGui::SameLine();
         if (!g_capturingHotkey) {
-            if (ImGui::Button("Change", ImVec2(80, 0))) {
+            if (ImGui::Button("Change", ImVec2(kChangeBtnW, 0))) {
                 g_capturingHotkey = true;
                 g_capturingWaitForRelease = true;
             }
         } else {
-            if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+            if (ImGui::Button("Cancel", ImVec2(kChangeBtnW, 0))) {
                 g_capturingHotkey = false;
                 g_capturingWaitForRelease = false;
             }
@@ -534,7 +570,10 @@ static void RenderSettingsPopup() {
         ImGui::TextUnformatted("Position");
         ImGui::PopStyleColor();
 
-        auto cornerButton = [](const char* label, Corner c) {
+        // Corner buttons size to fill the popup so they shrink with the
+        // S preset instead of pushing the popup wider than the overlay.
+        float halfBtnW = (ImGui::GetContentRegionAvail().x - 6.0f) * 0.5f;
+        auto cornerButton = [halfBtnW](const char* label, Corner c) {
             bool active = (g_settings.corner == c);
             if (active) {
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
@@ -542,16 +581,16 @@ static void RenderSettingsPopup() {
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(1.00f, 1.00f, 1.00f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(0.00f, 0.00f, 0.00f, 1.0f));
             }
-            if (ImGui::Button(label, ImVec2(140, 32))) {
+            if (ImGui::Button(label, ImVec2(halfBtnW, 32))) {
                 g_settings.corner = c;
                 PositionToCorner();
                 SaveSettings();
             }
             if (active) ImGui::PopStyleColor(4);
         };
-        cornerButton("Top Left", Corner::TopLeft);     ImGui::SameLine();
+        cornerButton("Top Left", Corner::TopLeft);     ImGui::SameLine(0, 6);
         cornerButton("Top Right", Corner::TopRight);
-        cornerButton("Bottom Left", Corner::BottomLeft); ImGui::SameLine();
+        cornerButton("Bottom Left", Corner::BottomLeft); ImGui::SameLine(0, 6);
         cornerButton("Bottom Right", Corner::BottomRight);
 
         ImGui::Dummy(ImVec2(0, 6));
@@ -560,16 +599,16 @@ static void RenderSettingsPopup() {
         ImGui::PopStyleColor();
 
         struct SizePreset { const char* label; int w, h; };
-        static const SizePreset presets[4] = {
-            { "S",  300, 380 },
+        static const SizePreset presets[3] = {
             { "M",  380, 480 },
             { "L",  460, 600 },
             { "XL", 560, 760 },
         };
+        const int kNumPresets = 3;
         float fullW = ImGui::GetContentRegionAvail().x;
         float gap   = 6.0f;
-        float btnW  = (fullW - gap * 3) / 4.0f;
-        for (int i = 0; i < 4; ++i) {
+        float btnW  = (fullW - gap * (kNumPresets - 1)) / (float)kNumPresets;
+        for (int i = 0; i < kNumPresets; ++i) {
             bool active = (g_settings.width == presets[i].w && g_settings.height == presets[i].h);
             if (active) {
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
@@ -584,7 +623,7 @@ static void RenderSettingsPopup() {
                 SaveSettings();
             }
             if (active) ImGui::PopStyleColor(4);
-            if (i < 3) ImGui::SameLine(0, gap);
+            if (i < kNumPresets - 1) ImGui::SameLine(0, gap);
         }
 
         ImGui::Dummy(ImVec2(0, 8));
@@ -633,19 +672,9 @@ static void RenderUI() {
             totalH += cardPadPre.y * 2.0f + lineH + headerExtra + kHeadBodyGap + ts.y;
         }
         if (g_ideas.size() > 1) totalH += spacing * (float)(g_ideas.size() - 1);
-        if (g_ideas.empty()) {
-            // Push empty-state hint to the bottom too.
-            float hintH = lineH;
-            if (hintH < availH) ImGui::Dummy(ImVec2(1.0f, availH - hintH));
-        } else if (totalH < availH) {
+        if (totalH < availH) {
             ImGui::Dummy(ImVec2(1.0f, availH - totalH));
         }
-    }
-
-    if (g_ideas.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.45f, 0.50f, 1.0f));
-        ImGui::TextWrapped("No ideas yet. Type below.  Prefix with [TAG] to tag.");
-        ImGui::PopStyleColor();
     }
 
     int deleteIdx = -1;
@@ -734,11 +763,12 @@ static void RenderUI() {
     }
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, inputFramePad);
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
     ImGui::InputTextMultiline("##in", inputBuf, IM_ARRAYSIZE(inputBuf),
         ImVec2(-1, inputH),
         ImGuiInputTextFlags_CallbackCharFilter,
         InputRejectNewline);
-    ImGui::PopStyleVar(2);
+    ImGui::PopStyleVar(3);
     bool inputFocused = ImGui::IsItemFocused();
 
     // Manual placeholder hint - InputTextMultiline has no built-in hint API.
